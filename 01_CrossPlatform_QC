@@ -1,0 +1,72 @@
+# Cross-platform gene and sample quality control
+rm(list = ls()); options(stringsAsFactors = FALSE)
+suppressPackageStartupMessages({library(data.table); library(dplyr); library(readxl)})
+path_env <- function(key) {value <- Sys.getenv(key, unset = ""); if (!nzchar(value)) stop("Missing environment variable: ", key); value}
+panel_file <- path_env("PANEL_FILE")
+retro_bulk_file <- path_env("RETRO_BULK_FILE")
+retro_nc_file <- path_env("RETRO_NCOUNTER_FILE")
+retro_label_file <- path_env("RETRO_LABEL_FILE")
+pro_bulk_file <- path_env("PRO_BULK_FILE")
+pro_nc_file <- path_env("PRO_NCOUNTER_FILE")
+pro_label_file <- path_env("PRO_LABEL_FILE")
+out_dir <- path_env("OUTPUT_DIR")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+sample_cutoff <- 0.50
+gene_cutoffs <- c(Good = 0.40, Acceptable = 0.20, Weak = 0.00)
+read_expression <- function(file) {
+  x <- fread(file, data.table = FALSE, check.names = FALSE)
+  m <- as.matrix(x[, -1, drop = FALSE]); storage.mode(m) <- "numeric"; rownames(m) <- as.character(x[[1]]); m
+}
+read_panel <- function(file) unique(as.character(read_excel(file)[[1]]))
+read_labels <- function(file) fread(file, data.table = FALSE, check.names = FALSE)[, c("Sample", "Cluster")]
+safe_cor <- function(x, y, method = "spearman") {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || sd(x[ok]) == 0 || sd(y[ok]) == 0) return(NA_real_)
+  cor(x[ok], y[ok], method = method)
+}
+safe_p <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || sd(x[ok]) == 0 || sd(y[ok]) == 0) return(NA_real_)
+  suppressWarnings(cor.test(x[ok], y[ok], method = "spearman", exact = FALSE)$p.value)
+}
+pair_data <- function(bulk, nc, labels) {
+  samples <- labels$Sample
+  list(bulk = bulk[, samples, drop = FALSE], nc = nc[, samples, drop = FALSE],
+       labels = labels)
+}
+sample_qc <- function(pair, genes, cohort) {
+  genes <- Reduce(intersect, list(genes, rownames(pair$bulk), rownames(pair$nc)))
+  nc_log <- log2(pmax(pair$nc[genes, , drop = FALSE], 0) + 1)
+  bind_rows(lapply(colnames(pair$bulk), function(s) data.frame(
+    Cohort = cohort, Sample = s, Cluster = pair$labels$Cluster[pair$labels$Sample == s],
+    N_genes = sum(is.finite(pair$bulk[genes, s]) & is.finite(nc_log[genes, s])),
+    Spearman = safe_cor(pair$bulk[genes, s], nc_log[genes, s]),
+    Pearson = safe_cor(pair$bulk[genes, s], nc_log[genes, s], "pearson")
+  ))) %>% mutate(Pass = is.finite(Spearman) & Spearman >= sample_cutoff)
+}
+gene_qc <- function(pair, genes, samples) {
+  genes <- Reduce(intersect, list(genes, rownames(pair$bulk), rownames(pair$nc)))
+  samples <- intersect(samples, colnames(pair$bulk))
+  bulk <- pair$bulk[genes, samples, drop = FALSE]
+  nc <- log2(pmax(pair$nc[genes, samples, drop = FALSE], 0) + 1)
+  bind_rows(lapply(genes, function(g) data.frame(
+    Gene = g, N_pairs = sum(is.finite(bulk[g, ]) & is.finite(nc[g, ])),
+    Spearman = safe_cor(bulk[g, ], nc[g, ]), P_value = safe_p(bulk[g, ], nc[g, ])
+  ))) %>% mutate(
+    Adjusted_P = p.adjust(P_value, method = "BH"),
+    Gene_QC = case_when(Spearman >= gene_cutoffs["Good"] ~ "Good",
+                        Spearman >= gene_cutoffs["Acceptable"] ~ "Acceptable",
+                        Spearman >= gene_cutoffs["Weak"] ~ "Weak", TRUE ~ "Poor"),
+    Retained_for_ML = Gene_QC != "Poor")
+}
+panel <- read_panel(panel_file)
+retro <- pair_data(read_expression(retro_bulk_file), read_expression(retro_nc_file), read_labels(retro_label_file))
+pro <- pair_data(read_expression(pro_bulk_file), read_expression(pro_nc_file), read_labels(pro_label_file))
+retro_sample <- sample_qc(retro, panel, "Retrospective")
+pro_sample <- sample_qc(pro, panel, "Prospective")
+retro_gene <- gene_qc(retro, panel, retro_sample$Sample[retro_sample$Pass])
+fwrite(retro_sample, file.path(out_dir, "retrospective_sample_qc.csv"))
+fwrite(pro_sample, file.path(out_dir, "prospective_sample_qc.csv"))
+fwrite(retro_gene, file.path(out_dir, "retrospective_gene_qc.csv"))
+fwrite(retro_gene[retro_gene$Retained_for_ML, "Gene", drop = FALSE], file.path(out_dir, "retained_genes.csv"))
+writeLines(capture.output(sessionInfo()), file.path(out_dir, "session_info.txt"))
