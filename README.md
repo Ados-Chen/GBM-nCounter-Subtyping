@@ -1,4 +1,4 @@
-A Validated FFPE-Compatible nCounter Panel and Model for Organoid-Confirmed Druggable-Pathway GBM Subtyping and Immune-Status Prediction
+## Validated FFPE-Compatible nCounter Panel and Model for Organoid-Confirmed Druggable-Pathway GBM Subtyping and Immune-Status Prediction
 
 This repository contains four R scripts and a sanitized ENET model for developing and validating an nCounter-based GBM cluster classifier.
 
